@@ -45,6 +45,7 @@ int main(int argc, char **argv) {
             dampen = 0.0f;
             inc = 1.0f / (read * div);
             printf("%s\n", msg);
+            fflush(stdout);
         }
     }
     sio_stop(s);
