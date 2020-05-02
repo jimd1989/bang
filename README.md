@@ -8,10 +8,14 @@ An attempt to sync my TR-606 to my OpenBSD machine with sndio. Very limited util
 
 ## Usage
 
-    bang <cutoff value 0:255> <clock divide> <message>
+    bang <cutoff value 0:255> <clock divide 0.0001:inf> <message>
 
-The program will listen to the audio input. If the amplitude is greater than the specified `cutoff`, then `message` will be displayed. I was having trouble with sndio eagerly reading audio at a high resolution no matter what values I passed to it, so `div` can be used to skip some cycles.
+The program will listen to the audio input. If the average amplitude of a sampled window is greater than the specified `cutoff`, then `message` will be displayed.
+
+The `div` argument can avoid triggering the message multiple times on a single pulse. When the message is printed, an envelope over the buffer will be engaged. All values read will be multiplied by a value ∈ [0,1] depending on the envelope position. The value of `div` is the number of buffer-read cycles that occur before the envelope increments back to 1.0. It doesn't need to be an integer.
+
+It's finnicky, but playing with the `cutoff` and `div` values should be able to track a pulse eventually.
 
 ## Caveats
 
-Many. Program assumes stereo input, 48000khz sample rate. sndio doesn't respect some of the settings on my soundcard/OS. Source code is like 50 lines, so just edit what doesn't please you.
+Many. Program assumes stereo input, 48000khz sample rate. sndio doesn't respect some of the settings on my soundcard/OS. The envelope is linear; I don't know if that is ideal. Source code is like 50 lines, so just edit what doesn't please you.
