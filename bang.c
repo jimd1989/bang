@@ -4,8 +4,8 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-#define RATE 48000
-#define RES 5
+#define RATE 4000
+#define RES 50
 #define BUFSIZE (RATE / RES)
 
 int main(int argc, char **argv) {

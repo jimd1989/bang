@@ -18,4 +18,4 @@ It's finnicky, but playing with the `cutoff` and `div` values should be able to 
 
 ## Caveats
 
-Many. Program assumes stereo input, 48000khz sample rate. sndio doesn't respect some of the settings on my soundcard/OS. The envelope is linear; I don't know if that is ideal. Source code is like 50 lines, so just edit what doesn't please you.
+Many. Program assumes stereo input, but only reads one channel. Locked to 4000khz sample rate, 8 bit depth. sndio doesn't respect some of the settings on my soundcard/OS. The envelope is linear; I don't know if that is ideal. Source code is like 50 lines, so just edit what doesn't please you.
