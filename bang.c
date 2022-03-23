@@ -63,7 +63,7 @@ Buffer makeBuffer(char *cu, char *mtl, char *ml, char *mr) {
 void avg(uint32_t *cd, uint32_t *avg, uint32_t n, int readChan) {
 
 /* Calculate running average of audio signal if not muted.
-/* Higher amplitudes are weighted more to emphasize pulses. */
+   Higher amplitudes are weighted more to emphasize pulses. */
 
   if (*cd) { *cd -= 1; } else { 
     n = abs(n);
@@ -105,7 +105,7 @@ void readAudio(Buffer *b) {
     }
   }
   bang(b);
-  //printf("%d %d %u %u\n", b->avgL, b->avgR, b->countdownL, b->countdownR);
+  /* printf("%d %d %u %u\n", b->avgL, b->avgR, b->countdownL, b->countdownR); */
 }
 
 
