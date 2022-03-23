@@ -11,22 +11,28 @@
 #define RES 400
 #define WINDOW (RATE / RES)
 #define BUFSIZE (WINDOW * CHAN)
-#define SHIFT 24
+#define SHIFT 16
 
 typedef struct Buffer {
+
+/* Buffer of incoming audio data, plus heaps of control variables. Master. */
+
   uint8_t                 cutoff;
-  uint32_t                avg_l;
-  uint32_t                avg_r;
-  uint32_t                countdown_l;
-  uint32_t                countdown_r;
-  uint32_t                mute_length;
-  char                  * msg_l;
-  char                  * msg_r;
+  uint32_t                avgL;
+  uint32_t                avgR;
+  uint32_t                countdownL;
+  uint32_t                countdownR;
+  uint32_t                muteLength;
+  char                  * msgL;
+  char                  * msgR;
   struct sio_hdl        * audio;
   int8_t                  buffer[BUFSIZE];
 } Buffer;
 
 void makeAudio(struct sio_hdl **s) {
+
+/* Open a connection to sio. Unchecked. */
+
  struct sio_par p;
  *s = sio_open(SIO_DEVANY, SIO_REC, 0);
  sio_initpar(&p);
@@ -40,55 +46,66 @@ void makeAudio(struct sio_hdl **s) {
 }
 
 Buffer makeBuffer(char *cu, char *mtl, char *ml, char *mr) {
+
+/* Create Buffer from command line arguments. */
+
   Buffer b = {0};
   int cutoff = atoi(cu);
   if (cutoff < 0 || cutoff > 255) { errx(1, "<cutoff> must be [0,255]"); }
   b.cutoff = (uint8_t)cutoff;
-  b.mute_length = (uint32_t)atoi(mtl);
-  if (*ml == '-') { b.msg_l = NULL; } else { b.msg_l = ml; }
-  if (*mr == '-') { b.msg_r = NULL; } else { b.msg_r = mr; }
+  b.muteLength = (uint32_t)atoi(mtl);
+  if (*ml == '-') { b.msgL = NULL; } else { b.msgL = ml; }
+  if (*mr == '-') { b.msgR = NULL; } else { b.msgR = mr; }
   makeAudio(&b.audio);
   return b;
 }
 
 void avg(uint32_t *cd, uint32_t *avg, uint32_t n, int readChan) {
-  if (*cd) { 
-    *cd -= 1; 
-  } else { 
+
+/* Calculate running average of audio signal if not muted.
+/* Higher amplitudes are weighted more to emphasize pulses. */
+
+  if (*cd) { *cd -= 1; } else { 
     n = abs(n);
     n = n * n * n * n;
-    n >>= 16;
+    n >>= SHIFT;
     *avg = (*avg * (readChan - 1) + n) / readChan;
   }
 }
 
 void bang(Buffer *b) {
-  if ((b->avg_l & 255) >= b->cutoff) {
-    printf("%s %u\n", b->msg_l, b->avg_l & 255); fflush(stdout);
-    b->countdown_l = WINDOW * b->mute_length; b->avg_l = 0;
+
+/* Fire left/right channel messages if either of them meet the cutoff. */
+
+  if ((b->avgL & 255) >= b->cutoff) {
+    printf("%s %u\n", b->msgL, b->avgL & 255); fflush(stdout);
+    b->countdownL = WINDOW * b->muteLength; b->avgL = 0;
   }
-  if ((b->avg_r & 255) >= b->cutoff) {
-    printf("%s %u\n", b->msg_r, b->avg_r & 255); fflush(stdout);
-    b->countdown_r = WINDOW * b->mute_length; b->avg_r = 0;
+  if ((b->avgR & 255) >= b->cutoff) {
+    printf("%s %u\n", b->msgR, b->avgR & 255); fflush(stdout);
+    b->countdownR = WINDOW * b->muteLength; b->avgR = 0;
   }
 }
 
 void readAudio(Buffer *b) {
+
+/* Read audio from both channels, calculate averages, print messages. */
+
   int i = 0;
   int read = sio_read(b->audio, b->buffer, BUFSIZE);
   int readChan = read / 2;
-  if (b->msg_l != NULL) {
+  if (b->msgL != NULL) {
     for (i = 0; i < read; i += 2) {
-      avg(&b->countdown_l, &b->avg_l, (uint32_t)b->buffer[i], readChan);
+      avg(&b->countdownL, &b->avgL, (uint32_t)b->buffer[i], readChan);
     }
   }
-  if (b->msg_r != NULL) {
+  if (b->msgR != NULL) {
     for (i = 0; i < read; i += 2) {
-      avg(&b->countdown_r, &b->avg_r, (uint32_t)b->buffer[i + 1], readChan);
+      avg(&b->countdownR, &b->avgR, (uint32_t)b->buffer[i + 1], readChan);
     }
   }
   bang(b);
-  //printf("%d %d %u %u\n", b->avg_l, b->avg_r, b->countdown_l, b->countdown_r);
+  //printf("%d %d %u %u\n", b->avgL, b->avgR, b->countdownL, b->countdownR);
 }
 
 
