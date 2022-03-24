@@ -7,8 +7,8 @@
 
 #define BITS 8
 #define CHAN 2
-#define RATE 8000
-#define RES 400
+#define RATE 4000
+#define RES 8
 #define WINDOW (RATE / RES)
 #define BUFSIZE (WINDOW * CHAN)
 #define SHIFT 16
@@ -104,8 +104,10 @@ void readAudio(Buffer *b) {
       avg(&b->countdownR, &b->avgR, (uint32_t)b->buffer[i + 1], readChan);
     }
   }
+  /*
   bang(b);
-  /* printf("%d %d %u %u\n", b->avgL, b->avgR, b->countdownL, b->countdownR); */
+  */
+  printf("%d %d %u %u %d\n", b->avgL, b->avgR, b->countdownL, b->countdownR, readChan);
 }
 
 
