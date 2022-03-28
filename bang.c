@@ -5,63 +5,46 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-#define BITS 8
-#define CHAN 2
-#define RATE 48000
-#define RES 250
-#define WINDOW (RATE / RES)
-#define BUFSIZE (WINDOW * CHAN)
-#define SHIFT 16
-#define RESOLUTION 250
+#define BITS 8          /* Bit depth of audio input                 */
+#define CHAN 2          /* Number of channels of audio input        */
+#define SIGNED 1        /* Read samples with signs                  */
+#define RATE 48000      /* Sampling rate of audio input             */
+#define SHIFT 16        /* Bit shift used to emphasize peak samples */
+#define RESOLUTION 250  /* Sampling windows per second              */
 
 typedef struct sio_hdl SioHdl;
 typedef struct sio_par SioPar;
 
-typedef struct AvgBuffer {
+typedef struct Buffer {
 
 /* Reads a buffer of audio data according to sndio's recommended settings, but
  * keeps track of averages according to the user's preferred resolution. */ 
 
-  uint32_t        avgL;
-  uint32_t        avgR;
-  uint32_t        bufsz;
-  uint32_t        countdown;
-  int32_t         countdownL;
-  int32_t         countdownR;
-  uint32_t        cutoff;
-  uint32_t        tillBang;
-  uint32_t        window;
-  uint32_t        windowChan;
-  char          * msgL;
-  char          * msgR;
-  SioHdl        * audio;
-  int8_t        * data;
-} AvgBuffer;
-
-typedef struct Buffer {
-
-/* Buffer of incoming audio data, plus heaps of control variables. Master. */
-
-  uint8_t                 cutoff;
-  uint32_t                avgL;
-  uint32_t                avgR;
-  int32_t                 countdownL;
-  int32_t                 countdownR;
-  uint32_t                muteLength;
-  char                  * msgL;
-  char                  * msgR;
-  struct sio_hdl        * audio;
-  int8_t                  buffer[BUFSIZE];
-  AvgBuffer               ab;
+  uint32_t        avgL;         /* Left channel samples running average      */
+  uint32_t        avgR;         /* Right channel samples running average     */
+  uint32_t        bufsz;        /* Audio buffer size in bytes                */
+  uint32_t        countdown;    /* RO: how many sampling windows to mute     */
+  int32_t         countdownL;   /* Left channel mute window countdown        */
+  int32_t         countdownR;   /* Right channel mute window countdown       */
+  uint32_t        cutoff;       /* RO: amplitude limit for bang              */
+  uint32_t        tillBang;     /* How many samples until next bang check    */
+  uint32_t        window;       /* RO: size of a sampling window in bytes    */
+  uint32_t        windowChan;   /* RO: half size of sampling window in bytes */
+  char          * msgL;         /* RO: message to fire on left channel bang  */
+  char          * msgR;         /* RO: message to fire of right channel bang */
+  SioHdl        * audio;        /* RO: audio stream                          */
+  int8_t        * data;         /* Buffer of audio data, `bufsz` bytes long  */
 } Buffer;
 
-
 void makeAudio(SioHdl **s, SioPar *p) {
+
+/* Initialize connection to sndio with proper settings. */
+
  *s = sio_open(SIO_DEVANY, SIO_REC, 0);
  if (*s == NULL) { errx(1, "couldn't open sound."); }
  sio_initpar(p);
  p->bits = BITS;
- p->sig = 1;
+ p->sig = SIGNED;
  p->rchan = CHAN;
  if (!sio_setpar(*s, p)) { errx(1, "couldn't apply sound settings"); }
  if (!sio_getpar(*s, p)) { errx(1, "couldn't get sound settings");   }
@@ -69,42 +52,56 @@ void makeAudio(SioHdl **s, SioPar *p) {
 }
 
 Buffer makeBuffer(char *cu, char *mtl, char *ml, char *mr, SioPar *p) {
+
+/* Make Buffer from command line arguments and hardware settings. */
+
   int samples = 0;
   Buffer b = {0};
   int cutoff = atoi(cu);
   if (cutoff < 0 || cutoff > 255) { errx(1, "<cutoff> must be [0,255]"); }
-  b.ab.cutoff = (uint8_t)cutoff;
-  b.muteLength = (uint32_t)atoi(mtl);
-  if (*ml == '-') { b.ab.msgL = NULL; } else { b.ab.msgL = ml; }
-  if (*mr == '-') { b.ab.msgR = NULL; } else { b.ab.msgR = mr; }
-  makeAudio(&b.ab.audio, p);
-  b.ab.window = p->rate / RESOLUTION;
-  samples = b.ab.window;
+  b.cutoff = (uint8_t)cutoff;
+  b.countdown = (uint32_t)atoi(mtl);
+  if (*ml == '-') { b.msgL = NULL; } else { b.msgL = ml; }
+  if (*mr == '-') { b.msgR = NULL; } else { b.msgR = mr; }
+  makeAudio(&b.audio, p);
+  b.window = p->rate / RESOLUTION;
+  samples = b.window;
   samples = samples + p->round -1;
   samples -= samples % p->round;
-  b.ab.data = calloc(samples * CHAN, BITS/8);
-  b.ab.bufsz = samples * CHAN * (BITS/8);
-  b.ab.windowChan = b.ab.window;
-  b.ab.window *= CHAN;
-  b.ab.tillBang = b.ab.window;
+  b.data = calloc(samples * CHAN, BITS/8);
+  b.bufsz = samples * CHAN * (BITS/8);
+  b.windowChan = b.window;
+  b.window *= CHAN;
+  b.tillBang = b.window;
   return b;
 }
 
 void avg(Buffer *b, int n) {
-  uint32_t ln = (uint32_t)abs(b->ab.data[n]);
-  uint32_t rn = (uint32_t)abs(b->ab.data[n + 1]);
-  ln = abs(n); ln = ln * ln * ln * ln; ln >>= SHIFT;
-  rn = abs(n); rn = rn * rn * rn * rn; rn >>= SHIFT;
-  b->ab.avgL = (b->ab.avgL * (b->ab.windowChan - 1) + ln) / b->ab.windowChan;
-  b->ab.avgR = (b->ab.avgR * (b->ab.windowChan - 1) + rn) / b->ab.windowChan;
+
+/* Add frame `n` (two interleaved stereo bytes) to the running average on each
+ * channel. Samples are 8 bit, but absolute value renders them 7 bit. They are
+ * cast to 32 bit for headroom during the averaging and peak emphasis process.
+ * */
+
+  uint32_t ln = (uint32_t)abs(b->data[n]);
+  uint32_t rn = (uint32_t)abs(b->data[n + 1]);
+  ln = ln * ln * ln * ln; ln >>= SHIFT;
+  rn = rn * rn * rn * rn; rn >>= SHIFT;
+  b->avgL = (b->avgL * (b->windowChan - 1) + ln) / b->windowChan;
+  b->avgR = (b->avgR * (b->windowChan - 1) + rn) / b->windowChan;
 }
 
 void bang(Buffer *b) {
-  b->ab.countdownL--; b->ab.countdownR--;
-  if (b->ab.countdownL <= 0 && (b->ab.avgL & 255) >= b->ab.cutoff) {
-    printf("%s %d\n", b->ab.msgL, b->ab.avgL); fflush(stdout); b->ab.countdownL = b->ab.countdown;
+
+/* If a channel is not currently muted and its average exceeds the cutoff, then
+ * fire off its message to stdout. */
+  
+  warnx("BANG %u\n", b->avgL);
+  b->countdownL--; b->countdownR--;
+  if (b->countdownL <= 0 && (b->avgL & 255) >= b->cutoff) {
+    printf("%s %d\n", b->msgL, b->avgL); fflush(stdout); b->countdownL = b->countdown;
   }
-  b->ab.tillBang = b->ab.window;
+  b->tillBang = b->window;
 }
 
 void readAudio(Buffer *b) {
@@ -114,9 +111,9 @@ void readAudio(Buffer *b) {
  * do not have to align perfectly. */
 
   int n = 0;
-  int read = sio_read(b->ab.audio, b->ab.data, b->ab.bufsz);
-  for (; n < read; n += CHAN, b->ab.tillBang -= CHAN) {
-    if (b->ab.tillBang == 0) { bang(b); }
+  int read = sio_read(b->audio, b->data, b->bufsz);
+  for (; n < read; n += CHAN, b->tillBang -= CHAN) {
+    if (b->tillBang == 0) { bang(b); }
     avg(b, n);
   }
 }
@@ -129,10 +126,10 @@ int main(int argc, char **argv) {
   }
   sio_initpar(&p);
   b = makeBuffer(argv[1], argv[2], argv[3], argv[4], &p);
-  sio_start(b.ab.audio);
+  sio_start(b.audio);
   while (1) { readAudio(&b); }
   sio_stop(b.audio);
   sio_close(b.audio);
-  free(b.buffer);
+  free(b.data);
   return 0;
 }
