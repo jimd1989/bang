@@ -7,12 +7,34 @@
 
 #define BITS 8
 #define CHAN 2
-#define RATE 24000
-#define RES 286
+#define RATE 48000
+#define RES 250
 #define WINDOW (RATE / RES)
 #define BUFSIZE (WINDOW * CHAN)
 #define SHIFT 16
-#define RESOLUTION 512
+#define RESOLUTION 250
+
+typedef struct sio_hdl SioHdl;
+typedef struct sio_par SioPar;
+
+typedef struct AvgBuffer {
+
+/* Reads a buffer of audio data according to sndio's recommended settings, but
+ * keeps track of averages according to the user's preferred resolution. */ 
+
+  uint32_t        avgL;
+  uint32_t        avgR;
+  uint32_t        bufsz;
+  uint32_t        countdown;
+  int32_t         countdownL;
+  int32_t         countdownR;
+  uint32_t        cutoff;
+  uint32_t        tillBang;
+  uint32_t        window;
+  uint32_t        windowChan;
+  SioHdl        * audio;
+  int8_t        * data;
+} AvgBuffer;
 
 typedef struct Buffer {
 
@@ -28,9 +50,9 @@ typedef struct Buffer {
   char                  * msgR;
   struct sio_hdl        * audio;
   int8_t                  buffer[BUFSIZE];
-  int8_t                * bufferN;
-  int32_t                 bufsz;
+  AvgBuffer               ab;
 } Buffer;
+
 
 void makeAudio(struct sio_hdl **s) {
 
@@ -46,10 +68,9 @@ void makeAudio(struct sio_hdl **s) {
  p.bufsz = BUFSIZE;
  p.appbufsz = BUFSIZE;
  sio_setpar(*s, &p);
- errx(1, "break");
 }
 
-void makeAudioN(struct sio_hdl **s, struct sio_par *p) {
+void makeAudioN(SioHdl **s, SioPar *p) {
  *s = sio_open(SIO_DEVANY, SIO_REC, 0);
  if (*s == NULL) { errx(1, "couldn't open sound."); }
  sio_initpar(p);
@@ -57,22 +78,58 @@ void makeAudioN(struct sio_hdl **s, struct sio_par *p) {
  p->sig = 1;
  p->rchan = CHAN;
  if (!sio_setpar(*s, p)) { errx(1, "couldn't apply sound settings"); }
- if (!sio_getpar(*s, p)) { errx(1, "couldn't get sound settings"); }
+ if (!sio_getpar(*s, p)) { errx(1, "couldn't get sound settings");   }
+ if (p->rchan != CHAN)   { errx(1, "expected stereo input");         }
 }
 
-Buffer makeBufferN(char *cu, char *mtl, char *ml, char *mr, struct sio_par *p) {
+Buffer makeBufferN(char *cu, char *mtl, char *ml, char *mr, SioPar *p) {
   int samples = 0;
   Buffer b = {0};
   int cutoff = atoi(cu);
   if (cutoff < 0 || cutoff > 255) { errx(1, "<cutoff> must be [0,255]"); }
-  b.cutoff = (uint8_t)cutoff;
+  b.ab.cutoff = (uint8_t)cutoff;
   b.muteLength = (uint32_t)atoi(mtl);
   if (*ml == '-') { b.msgL = NULL; } else { b.msgL = ml; }
   if (*mr == '-') { b.msgR = NULL; } else { b.msgR = mr; }
-  makeAudioN(&b.audio, p);
-  samples = p->rate / RESOLUTION;
-  samples -= samples % p->round - p->round;
-  b.bufferN = calloc(samples * p->rchan, sizeof(int8_t));
+  makeAudioN(&b.ab.audio, p);
+  b.ab.window = p->rate / RESOLUTION;
+  samples = b.ab.window;
+  samples = samples + p->round -1;
+  samples -= samples % p->round;
+  b.ab.data = calloc(samples * CHAN, BITS/8);
+  b.ab.bufsz = samples * CHAN * (BITS/8);
+  b.ab.windowChan = b.ab.window;
+  b.ab.window *= CHAN;
+  b.ab.tillBang = b.ab.window;
+  return b;
+}
+
+void avgN(Buffer *b, int n) {
+  uint32_t ln = (uint32_t)abs(b->ab.data[n]);
+  uint32_t rn = (uint32_t)abs(b->ab.data[n + 1]);
+  ln = abs(n); ln = ln * ln * ln * ln; ln >>= SHIFT;
+  rn = abs(n); rn = rn * rn * rn * rn; rn >>= SHIFT;
+  b->ab.avgL = (b->ab.avgL * (b->ab.windowChan - 1) + ln) / b->ab.windowChan;
+  b->ab.avgR = (b->ab.avgR * (b->ab.windowChan - 1) + rn) / b->ab.windowChan;
+}
+
+void bangN(Buffer *b) {
+
+  b->countdownL--; b->countdownR--;
+  b->ab.tillBang = b->ab.window;
+}
+
+void readAudioN(Buffer *b) {
+
+/* Read a buffer full of audio data, keeping a running average for each channel.
+ * Every `window` bytes, run the `bang` command. The window and buffer length
+ * do not have to align perfectly. */
+
+  int n = 0;
+  int read = sio_read(b->ab.audio, b->ab.data, b->ab.bufsz);
+  for (; n < read; n += CHAN, b->ab.tillBang -= CHAN) {
+    if (b->ab.tillBang == 0) { bangN(b); }
+  }
 }
 
 Buffer makeBuffer(char *cu, char *mtl, char *ml, char *mr) {
@@ -140,13 +197,16 @@ void readAudio(Buffer *b) {
 
 int main(int argc, char **argv) {
   Buffer b = {0};
+  struct sio_par p;
   if (argc != 5) { 
     errx(1, "usage: <cutoff 0-255> <mute length> <left msg> <right msg>");
   }
-  b = makeBuffer(argv[1], argv[2], argv[3], argv[4]);
-  sio_start(b.audio);
-  while (1) { readAudio(&b); }
+  sio_initpar(&p);
+  b = makeBufferN(argv[1], argv[2], argv[3], argv[4], &p);
+  sio_start(b.ab.audio);
+  while (1) { readAudioN(&b); }
   sio_stop(b.audio);
   sio_close(b.audio);
+  free(b.buffer);
   return 0;
 }
