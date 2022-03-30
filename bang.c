@@ -6,10 +6,6 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-/* TODO: 
- * getopts
- * */
-
 #define BITS 8             /* Bit depth of audio input                   */
 #define CHAN 2             /* Number of channels of audio input          */
 #define SIGNED 1           /* Read samples with signs                    */
