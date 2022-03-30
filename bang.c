@@ -13,6 +13,7 @@
  * runtime mute button (start muted?)
  * per channel cutoff
  * measure pulse length
+ * CHANGE COMMENTS / DOCS
  * */
 
 #define BITS 8             /* Bit depth of audio input                   */
@@ -21,7 +22,6 @@
 #define RATE 48000         /* Sampling rate of audio input               */
 #define SHIFT 16           /* Bit shift used to emphasize peak samples   */
 #define RESOLUTION 1000    /* Sampling windows per second                */
-#define PULSE_RESOLUTION 8 /* How many pulses to average for beat length */
 #define MUTE_CHAR '-'      /* Mute channel for this message              */
 
 typedef struct sio_hdl SioHdl;
@@ -37,10 +37,7 @@ typedef struct PulseClock {
 
   bool            pulseOn;         /* Signal is currently pulsing            */
   uint8_t         cutoff;          /* RO: pulse detection cutoff             */
-  float           avgPeriod;       /* Running average of pulse distances     */
-  float           avgSample;       /* Running average of amplitudes          */
-  float           periodCountdown; /* Sampling windows till print `msg`      */
-  uint32_t        periodLen;       /* Distance between pulse N and N+1       */
+  uint32_t        avgSample;       /* Running average of amplitudes          */
   char          * msg;             /* RO: printed when `periodCountdown` = 0 */
 } PulseClock;
 
@@ -123,11 +120,11 @@ uint32_t emphasize(int8_t amplitude) {
   return n >> SHIFT;
 }
 
-float avg(float a, uint32_t n, uint32_t d) {
+uint32_t avg(uint32_t a, uint32_t n, uint32_t d) {
 
 /* Recalculate running average `a` over `d` samples with `n`. */
 
-  return (a * ((float)d - 1) + n) / (float)d;
+  return (a * (d - 1) + n) / d;
 }
 
 void pulseCheck(PulseClock *pc) {
@@ -139,24 +136,12 @@ void pulseCheck(PulseClock *pc) {
  * sync, but the rhythm will be inaccurate until the average "warms up." */
 
   if (*pc->msg == MUTE_CHAR) { return; }
-  if (pc->pulseOn && (uint32_t)pc->avgSample >= pc->cutoff) { 
-    pc->periodLen += 1; 
-  } else if (pc->pulseOn && (uint32_t)pc->avgSample < pc->cutoff) {
+  if (pc->pulseOn && pc->avgSample >= pc->cutoff) { 
+    return;
+  } else if (pc->pulseOn && pc->avgSample < pc->cutoff) {
     pc->pulseOn = false;
-    pc->periodLen += 1;
-  } else if ((uint32_t)pc->avgSample >= pc->cutoff) {
-    /* Debug
-    warnx("PULSE %f %f %d", pc->avgPeriod, pc->periodCountdown, pc->periodLen);
-    */
-    pc->pulseOn = true;
-    pc->avgPeriod = avg(pc->avgPeriod, pc->periodLen, PULSE_RESOLUTION);
-    pc->periodLen = 0;
-  } else {
-    pc->periodLen += 1;
-  }
-  if (--pc->periodCountdown <= 0) {
-    printf("%s\n", pc->msg); fflush(stdout);
-    pc->periodCountdown += pc->avgPeriod;
+  } else if (pc->avgSample >= pc->cutoff) {
+    printf("%s\n", pc->msg); fflush(stdout); pc->pulseOn = true;
   }
 }
 
