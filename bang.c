@@ -1,5 +1,6 @@
 #include <err.h>
 #include <math.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <sndio.h>
 #include <stdint.h>
@@ -9,32 +10,46 @@
  * getopts
  * flag for passing velocity along with message
  * change cutoff etc at runtime
+ * runtime mute button (start muted?)
  * per channel cutoff
  * measure pulse length
  * */
 
-#define BITS 8          /* Bit depth of audio input                 */
-#define CHAN 2          /* Number of channels of audio input        */
-#define SIGNED 1        /* Read samples with signs                  */
-#define RATE 48000      /* Sampling rate of audio input             */
-#define SHIFT 16        /* Bit shift used to emphasize peak samples */
-#define RESOLUTION 2000 /* Sampling windows per second              */
+#define BITS 8             /* Bit depth of audio input                   */
+#define CHAN 2             /* Number of channels of audio input          */
+#define SIGNED 1           /* Read samples with signs                    */
+#define RATE 48000         /* Sampling rate of audio input               */
+#define SHIFT 16           /* Bit shift used to emphasize peak samples   */
+#define RESOLUTION 1000    /* Sampling windows per second                */
+#define PULSE_RESOLUTION 8 /* How many pulses to average for beat length */
+#define MUTE_CHAR '-'      /* Mute channel for this message              */
 
 typedef struct sio_hdl SioHdl;
 typedef struct sio_par SioPar;
+
+typedef struct PulseClock {
+
+/* 1. Keeps a running average off all amplitudes on channel in `avgSample`.
+ * 2. Detects pulses (when `avgSample` exceeds `cutoff`).
+ * 3. Measures distance between pulses and keeps running average in `avgPeriod`.
+ * 4. Prints `msg` every `avgPeriod` sampling windows.
+ * This ensures a steady rhythm that cannot be upset by erratic amplitudes. */ 
+
+  bool            pulseOn;         /* Signal is currently pulsing            */
+  uint8_t         cutoff;          /* RO: pulse detection cutoff             */
+  uint32_t        avgPeriod;       /* Running average of pulse distances     */
+  uint32_t        avgSample;       /* Running average of amplitudes          */
+  int32_t         periodCountdown; /* Sampling windows till print `msg`      */
+  uint32_t        periodLen;       /* Distance between pulse N and N+1       */
+  char          * msg;             /* RO: printed when `periodCountdown` = 0 */
+} PulseClock;
 
 typedef struct Buffer {
 
 /* Reads a buffer of audio data according to sndio's recommended settings, but
  * keeps track of averages according to the user's preferred resolution. */ 
 
-  uint32_t        avgL;         /* Left channel samples running average      */
-  uint32_t        avgR;         /* Right channel samples running average     */
   uint32_t        bufsz;        /* Audio buffer size in bytes                */
-  uint32_t        countdown;    /* RO: how many sampling windows to mute     */
-  int32_t         countdownL;   /* Left channel mute window countdown        */
-  int32_t         countdownR;   /* Right channel mute window countdown       */
-  uint32_t        cutoff;       /* RO: amplitude limit for bang              */
   uint32_t        tillBang;     /* How many samples until next bang check    */
   uint32_t        window;       /* RO: size of a sampling window in bytes    */
   uint32_t        windowChan;   /* RO: half size of sampling window in bytes */
@@ -42,6 +57,8 @@ typedef struct Buffer {
   char          * msgR;         /* RO: message to fire of right channel bang */
   SioHdl        * audio;        /* RO: audio stream                          */
   int8_t        * data;         /* Buffer of audio data, `bufsz` bytes long  */
+  PulseClock      pulseL;       /* Pulse Clock for left channel              */
+  PulseClock      pulseR;       /* Pulse Clock for right channel             */
 } Buffer;
 
 void makeAudio(SioHdl **s, SioPar *p) {
@@ -61,6 +78,16 @@ void makeAudio(SioHdl **s, SioPar *p) {
  if (p->rchan != CHAN)   { errx(1, "expected stereo input");         }
 }
 
+PulseClock makePulseClock(uint8_t cutoff, char *msg) {
+
+/* Initialize a new Pulse Clock. */
+
+  PulseClock pc = {0};
+  pc.cutoff = cutoff;
+  pc.msg = msg;
+  return pc;
+}
+
 Buffer makeBuffer(char *cu, char *mtl, char *ml, char *mr, SioPar *p) {
 
 /* Make Buffer from command line arguments and hardware settings. */
@@ -69,10 +96,6 @@ Buffer makeBuffer(char *cu, char *mtl, char *ml, char *mr, SioPar *p) {
   Buffer b = {0};
   int cutoff = atoi(cu);
   if (cutoff < 0 || cutoff > 255) { errx(1, "<cutoff> must be [0,255]"); }
-  b.cutoff = (uint8_t)cutoff;
-  b.countdown = (uint32_t)abs(atoi(mtl));
-  if (*ml == '-') { b.msgL = NULL; } else { b.msgL = ml; }
-  if (*mr == '-') { b.msgR = NULL; } else { b.msgR = mr; }
   makeAudio(&b.audio, p);
   b.window = p->rate / RESOLUTION;
   samples = b.window;
@@ -83,39 +106,56 @@ Buffer makeBuffer(char *cu, char *mtl, char *ml, char *mr, SioPar *p) {
   b.windowChan = b.window;
   b.window *= CHAN;
   b.tillBang = b.window;
+  b.pulseL = makePulseClock((uint8_t)cutoff, ml);
+  b.pulseR = makePulseClock((uint8_t)cutoff, mr);
   return b;
 }
 
-void avg(Buffer *b, int n) {
+uint32_t emphasize(int8_t amplitude) {
 
-/* Add frame `n` (two interleaved stereo bytes) to the running average on each
- * channel. Samples are 8 bit, but absolute value renders them 7 bit. They are
- * cast to 32 bit for headroom during averaging and peak emphasis process. */
+/* Emphasize higher amplitudes over lower ones. Output is expected to be
+ * [0,255] if input is provided at a reasonable recording volume, but this is
+ * not enforced to avoid integer wrapping. Please adjust your sndio settings if
+ * amplitudes are clipping in this manner. */
 
-  uint32_t ln = (uint32_t)abs(b->data[n]);
-  uint32_t rn = (uint32_t)abs(b->data[n + 1]);
-  ln = ln * ln * ln * ln; ln >>= SHIFT;
-  rn = rn * rn * rn * rn; rn >>= SHIFT;
-  b->avgL = (b->avgL * (b->windowChan - 1) + ln) / b->windowChan;
-  b->avgR = (b->avgR * (b->windowChan - 1) + rn) / b->windowChan;
+  uint32_t n = (uint32_t)abs(amplitude);
+  n = n * n * n * n;
+  return n >> SHIFT;
 }
 
-void bang(Buffer *b) {
+uint32_t avg(uint32_t a, uint32_t n, uint32_t d) {
 
-/* If a channel is not currently muted and its average exceeds the cutoff, then
- * fire off its message to stdout. */
+/* Recalculate running average `a` over `d` samples with `n`. */
 
-  b->countdownL--; b->countdownR--;
-  /* Debug
-  printf("%d %d %d\n", b->avgL, b->countdownL, b->window);
-  */
-  if (b->msgL != NULL && b->countdownL <= 0 && (b->avgL & 255) >= b->cutoff) {
-    printf("%s %d\n", b->msgL); fflush(stdout); b->countdownL = b->countdown;
+  return (a * (d - 1) + n) / d;
+}
+
+void pulseCheck(PulseClock *pc) {
+
+/* 1. Measures the distance between each pulse and averages them as `avgPeriod`.
+ * 2. Fires off `msg` after `avgPeriod` sampling windows have passed.
+ * Keeping messaging and pulse detection separate ensures a steady beat and 
+ * reduces the number of user-specified parameters needed to fine tune the
+ * sync, but the rhythm will be inaccurate until the average "warms up." */
+
+  if (*pc->msg == MUTE_CHAR) { return; }
+  if (pc->pulseOn && pc->avgSample >= pc->cutoff) { 
+    pc->periodLen += 1; 
+  } else if (pc->pulseOn && pc->avgSample < pc->cutoff) {
+    pc->pulseOn = false;
+    pc->periodLen += 1;
+  } else if (pc->avgSample >= pc->cutoff) {
+    warnx("PULSE %d %u", pc->avgPeriod, pc->periodCountdown);
+    pc->pulseOn = true;
+    pc->avgPeriod = avg(pc->avgPeriod, pc->periodLen, PULSE_RESOLUTION);
+    pc->periodLen = 0;
+  } else {
+    pc->periodLen += 1;
   }
-  if (b->msgR != NULL && b->countdownR <= 0 && (b->avgR & 255) >= b->cutoff) {
-    printf("%s %d\n", b->msgR); fflush(stdout); b->countdownR = b->countdown;
+  if (--pc->periodCountdown <= 0) {
+    printf("%s\n", pc->msg); fflush(stdout);
+    pc->periodCountdown = pc->avgPeriod;
   }
-  b->tillBang = b->window;
 }
 
 void readAudio(Buffer *b) {
@@ -125,10 +165,18 @@ void readAudio(Buffer *b) {
  * do not have to align perfectly. */
 
   int n = 0;
+  PulseClock *pc = NULL;
   int read = sio_read(b->audio, b->data, b->bufsz);
   for (; n < read; n += CHAN, b->tillBang -= CHAN) {
-    if (b->tillBang == 0) { bang(b); }
-    avg(b, n);
+    if (b->tillBang == 0) {
+      pulseCheck(&b->pulseL);
+      pulseCheck(&b->pulseR);
+      b->tillBang = b->window;
+    }
+    pc = &b->pulseL;
+    pc->avgSample = avg(pc->avgSample, emphasize(b->data[n]), b->windowChan);
+    pc = &b->pulseR;
+    pc->avgSample = avg(pc->avgSample, emphasize(b->data[n+1]), b->windowChan);
   }
 }
 
