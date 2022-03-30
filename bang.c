@@ -37,9 +37,9 @@ typedef struct PulseClock {
 
   bool            pulseOn;         /* Signal is currently pulsing            */
   uint8_t         cutoff;          /* RO: pulse detection cutoff             */
-  uint32_t        avgPeriod;       /* Running average of pulse distances     */
-  uint32_t        avgSample;       /* Running average of amplitudes          */
-  int32_t         periodCountdown; /* Sampling windows till print `msg`      */
+  float           avgPeriod;       /* Running average of pulse distances     */
+  float           avgSample;       /* Running average of amplitudes          */
+  float           periodCountdown; /* Sampling windows till print `msg`      */
   uint32_t        periodLen;       /* Distance between pulse N and N+1       */
   char          * msg;             /* RO: printed when `periodCountdown` = 0 */
 } PulseClock;
@@ -123,11 +123,11 @@ uint32_t emphasize(int8_t amplitude) {
   return n >> SHIFT;
 }
 
-uint32_t avg(uint32_t a, uint32_t n, uint32_t d) {
+float avg(float a, uint32_t n, uint32_t d) {
 
 /* Recalculate running average `a` over `d` samples with `n`. */
 
-  return (a * (d - 1) + n) / d;
+  return (a * ((float)d - 1) + n) / (float)d;
 }
 
 void pulseCheck(PulseClock *pc) {
@@ -139,13 +139,15 @@ void pulseCheck(PulseClock *pc) {
  * sync, but the rhythm will be inaccurate until the average "warms up." */
 
   if (*pc->msg == MUTE_CHAR) { return; }
-  if (pc->pulseOn && pc->avgSample >= pc->cutoff) { 
+  if (pc->pulseOn && (uint32_t)pc->avgSample >= pc->cutoff) { 
     pc->periodLen += 1; 
-  } else if (pc->pulseOn && pc->avgSample < pc->cutoff) {
+  } else if (pc->pulseOn && (uint32_t)pc->avgSample < pc->cutoff) {
     pc->pulseOn = false;
     pc->periodLen += 1;
-  } else if (pc->avgSample >= pc->cutoff) {
-    warnx("PULSE %d %u", pc->avgPeriod, pc->periodCountdown);
+  } else if ((uint32_t)pc->avgSample >= pc->cutoff) {
+    /* Debug
+    warnx("PULSE %f %f %d", pc->avgPeriod, pc->periodCountdown, pc->periodLen);
+    */
     pc->pulseOn = true;
     pc->avgPeriod = avg(pc->avgPeriod, pc->periodLen, PULSE_RESOLUTION);
     pc->periodLen = 0;
@@ -154,7 +156,7 @@ void pulseCheck(PulseClock *pc) {
   }
   if (--pc->periodCountdown <= 0) {
     printf("%s\n", pc->msg); fflush(stdout);
-    pc->periodCountdown = pc->avgPeriod;
+    pc->periodCountdown += pc->avgPeriod;
   }
 }
 
