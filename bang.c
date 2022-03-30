@@ -8,12 +8,6 @@
 
 /* TODO: 
  * getopts
- * flag for passing velocity along with message
- * change cutoff etc at runtime
- * runtime mute button (start muted?)
- * per channel cutoff
- * measure pulse length
- * CHANGE COMMENTS / DOCS
  * */
 
 #define BITS 8             /* Bit depth of audio input                   */
@@ -29,11 +23,7 @@ typedef struct sio_par SioPar;
 
 typedef struct PulseClock {
 
-/* 1. Keeps a running average off all amplitudes on channel in `avgSample`.
- * 2. Detects pulses (when `avgSample` exceeds `cutoff`).
- * 3. Measures distance between pulses and keeps running average in `avgPeriod`.
- * 4. Prints `msg` every `avgPeriod` sampling windows.
- * This ensures a steady rhythm that cannot be upset by erratic amplitudes. */ 
+/* Detect pulses (when `avgSample` exceeds `cutoff`) and print msg. */
 
   bool            pulseOn;         /* Signal is currently pulsing            */
   uint8_t         cutoff;          /* RO: pulse detection cutoff             */
@@ -85,14 +75,21 @@ PulseClock makePulseClock(uint8_t cutoff, char *msg) {
   return pc;
 }
 
-Buffer makeBuffer(char *cu, char *mtl, char *ml, char *mr, SioPar *p) {
+uint8_t makeCutoff(char *c) {
+
+/* Parse argument and enforce cutoff bounds. */
+
+  int cutoff = atoi(c);
+  if (cutoff < 0 || cutoff > 255) { errx(1, "<cutoff> must be [0,255]"); }
+  return (uint8_t)cutoff;
+}
+
+Buffer makeBuffer(char *cl, char *cr, char *ml, char *mr, SioPar *p) {
 
 /* Make Buffer from command line arguments and hardware settings. */
 
   int samples = 0;
   Buffer b = {0};
-  int cutoff = atoi(cu);
-  if (cutoff < 0 || cutoff > 255) { errx(1, "<cutoff> must be [0,255]"); }
   makeAudio(&b.audio, p);
   b.window = p->rate / RESOLUTION;
   samples = b.window;
@@ -103,8 +100,8 @@ Buffer makeBuffer(char *cu, char *mtl, char *ml, char *mr, SioPar *p) {
   b.windowChan = b.window;
   b.window *= CHAN;
   b.tillBang = b.window;
-  b.pulseL = makePulseClock((uint8_t)cutoff, ml);
-  b.pulseR = makePulseClock((uint8_t)cutoff, mr);
+  b.pulseL = makePulseClock(makeCutoff(cl), ml);
+  b.pulseR = makePulseClock(makeCutoff(cr), mr);
   return b;
 }
 
@@ -129,11 +126,8 @@ uint32_t avg(uint32_t a, uint32_t n, uint32_t d) {
 
 void pulseCheck(PulseClock *pc) {
 
-/* 1. Measures the distance between each pulse and averages them as `avgPeriod`.
- * 2. Fires off `msg` after `avgPeriod` sampling windows have passed.
- * Keeping messaging and pulse detection separate ensures a steady beat and 
- * reduces the number of user-specified parameters needed to fine tune the
- * sync, but the rhythm will be inaccurate until the average "warms up." */
+/* Print `msg` at the start of a pulse, but ignore subsequent sampling windows
+ * that exceed the `cutoff`. */  
 
   if (*pc->msg == MUTE_CHAR) { return; }
   if (pc->pulseOn && pc->avgSample >= pc->cutoff) { 
@@ -148,8 +142,8 @@ void pulseCheck(PulseClock *pc) {
 void readAudio(Buffer *b) {
 
 /* Read a buffer full of audio data, keeping a running average for each channel.
- * Every `window` bytes, run the `bang` command. The window and buffer length
- * do not have to align perfectly. */
+ * Every `window` bytes, run the `pulseCheck` command. The window and buffer 
+ * length do not have to align perfectly. */
 
   int n = 0;
   PulseClock *pc = NULL;
@@ -171,7 +165,7 @@ int main(int argc, char **argv) {
   Buffer b = {0};
   struct sio_par p;
   if (argc != 5) { 
-    errx(1, "usage: <cutoff 0-255> <mute length> <left msg> <right msg>");
+    errx(1, "usage: <right cutoff 255> <left cutoff> <left msg> <right msg>");
   }
   sio_initpar(&p);
   b = makeBuffer(argv[1], argv[2], argv[3], argv[4], &p);
